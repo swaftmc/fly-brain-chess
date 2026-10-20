@@ -140,9 +140,12 @@ def train(args):
     for game_idx in range(1, args.games + 1):
         board = chess.Board()
         agent_color = chess.WHITE
-        log_probs = []
         rewards = []
-        entropies = []
+
+        if opt_dense:
+            opt_dense.zero_grad()
+        if opt_sparse:
+            opt_sparse.zero_grad()
 
         while not board.is_game_over() and board.fullmove_number <= args.max_moves:
             if board.turn == agent_color:
@@ -164,37 +167,23 @@ def train(args):
                 board_before = board.copy()
                 board.push(selected)
                 r = shaped_reward(board_before, selected, board, engine, agent_color)
-                log_probs.append(log_prob)
                 rewards.append(r)
-                entropies.append(entropy)
+
+                reward_t = torch.tensor(r, device=device, dtype=torch.float32)
+                loss = -log_prob * reward_t - args.entropy * entropy
+                loss.backward()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             else:
                 opponent_move(board, engine, args.opponent_elo)
 
-        # returns
-        returns = []
-        G = 0.0
-        for r in reversed(rewards):
-            G = r + args.gamma * G
-            returns.insert(0, G)
-        if not returns:
+        if not rewards:
             print(f"Game {game_idx}: no agent moves")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             continue
-        ret_t = torch.tensor(returns, dtype=torch.float32, device=device)
-        if ret_t.numel() > 1:
-            ret_t = (ret_t - ret_t.mean()) / (ret_t.std() + 1e-8)
 
-        # backward
-        if opt_dense:
-            opt_dense.zero_grad()
-        if opt_sparse:
-            opt_sparse.zero_grad()
-
-        for lp, Gv, ent in zip(log_probs, ret_t, entropies):
-            loss = -lp * Gv.detach() - args.entropy * ent
-            loss.backward()
-
+        # update accumulated gradients from all moves
         if opt_dense:
             torch.nn.utils.clip_grad_norm_(dense_params, args.grad_clip)
             opt_dense.step()
@@ -204,7 +193,7 @@ def train(args):
 
         outcome = board.result() if board.is_game_over() else "*"
         print(f"Game {game_idx}/{args.games} outcome={outcome} moves={len(rewards)} "
-              f"return={sum(returns):.3f}")
+              f"return={sum(rewards):.3f}")
         if torch.cuda.is_available():
             print(f"  post-game gpu_alloc={torch.cuda.memory_allocated()/1e9:.2f}GB "
                   f"gpu_reserved={torch.cuda.memory_reserved()/1e9:.2f}GB", flush=True)
