@@ -242,13 +242,10 @@ def main():
     p.add_argument("--stockfish", default=None)
     p.add_argument("--train-backbone", action="store_true")
     p.add_argument("--checkpoint-dir", default=str(ROOT.parent / "checkpoints"))
-    p.add_argument("--parallel", type=int, default=1,
+    p.add_argument("--parallel", type=int, default=7,
                    help="Number of games to run in parallel (batched on GPU)")
     args = p.parse_args()
-    if args.parallel and args.parallel > 1:
-        train_parallel(args)
-    else:
-        train_single(args)
+    train_parallel(args)
 
 
 def train_parallel(args):
