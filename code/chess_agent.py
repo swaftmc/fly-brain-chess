@@ -87,6 +87,12 @@ class ChessBrain(nn.Module):
         self.readout = nn.Linear(readout_size, NUM_MOVES)
         self.value_head = nn.Linear(readout_size, 1)
 
+        if device == "cuda":
+            try:
+                self._simulate = torch.compile(self._simulate, mode="reduce-overhead", dynamic=True)
+            except Exception:
+                pass
+
     def _build_weights(self) -> torch.Tensor:
         if self.crow_indices is not None:
             return torch.sparse_csr_tensor(

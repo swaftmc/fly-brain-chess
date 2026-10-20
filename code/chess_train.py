@@ -12,8 +12,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import chess
 import chess.engine
 import torch
-import torch.nn.functional as F
-
+torch.set_float32_matmul_precision("high")
 try:
     torch.sparse.check_sparse_tensor_invariants(False)
 except Exception:
