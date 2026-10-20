@@ -114,7 +114,14 @@ class ChessBrain(nn.Module):
         return self._simulate(rates, weights)
 
     def _simulate(self, rates: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        conductance, delay_buffer, spikes, v, refrac = self.neurons.state_init()
+        batch = rates.shape[0]
+        conductance = torch.zeros(batch, self.num_neurons, device=self.device)
+        delay_buffer = torch.zeros(
+            batch, self.neurons.synapse.steps_delay + 1, self.num_neurons, device=self.device
+        )
+        spikes = torch.zeros(batch, self.num_neurons, device=self.device)
+        v = torch.zeros(batch, self.num_neurons, device=self.device) + MODEL_PARAMS["v0"]
+        refrac = self.neurons.refrac_steps.unsqueeze(0).repeat(batch, 1).float()
         readout_counts = torch.zeros(1, self.readout_size, device=self.device)
         for step in range(self.sim_steps):
             poisson_spikes = self.poisson(rates)
