@@ -177,8 +177,6 @@ def train(args):
                 reward_t = torch.tensor(r, device=device, dtype=torch.float32)
                 loss = -log_prob * reward_t - args.entropy * entropy
                 loss.backward()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
             else:
                 opponent_move(board, engine, args.opponent_elo)
 
