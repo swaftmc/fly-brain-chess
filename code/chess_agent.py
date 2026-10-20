@@ -1,17 +1,22 @@
 """Trainable fly-brain chess agent (PyTorch backend)."""
 
-from __future__ import annotations
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import sys
 from pathlib import Path
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+try:
+    torch.sparse.check_sparse_tensor_invariants(False)
+except Exception:
+    pass
 
 from run_pytorch import (
     MODEL_PARAMS,
@@ -101,9 +106,17 @@ class ChessBrain(nn.Module):
         if rates.dim() == 1:
             rates = rates.unsqueeze(0)
         weights = self._build_weights()
+
+        if not self.train_backbone:
+            with torch.no_grad():
+                return self._simulate(rates, weights).detach()
+
+        return self._simulate(rates, weights)
+
+    def _simulate(self, rates: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
         conductance, delay_buffer, spikes, v, refrac = self.neurons.state_init()
         readout_counts = torch.zeros(1, self.readout_size, device=self.device)
-        for _ in range(self.sim_steps):
+        for step in range(self.sim_steps):
             poisson_spikes = self.poisson(rates)
             voltage_stim = self.scale * poisson_spikes
             if weights.is_sparse:
@@ -115,6 +128,9 @@ class ChessBrain(nn.Module):
                 recurrent_input, voltage_stim, conductance, delay_buffer, spikes, v, refrac,
             )
             readout_counts = readout_counts + spikes[:, self.readout_indices]
+            if step % 100 == 0 and torch.cuda.is_available():
+                print(f"  sim step {step}/{self.sim_steps} "
+                      f"alloc={torch.cuda.memory_allocated()/1e9:.2f}GB", flush=True)
         return readout_counts
 
     def forward(self, rates: torch.Tensor):

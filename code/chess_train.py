@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import os
 import random
 from pathlib import Path
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import chess
 import chess.engine
 import torch
 import torch.nn.functional as F
+
+try:
+    torch.sparse.check_sparse_tensor_invariants(False)
+except Exception:
+    pass
 
 ROOT = Path(__file__).resolve().parent
 import sys
@@ -139,6 +147,10 @@ def train(args):
         while not board.is_game_over() and board.fullmove_number <= args.max_moves:
             if board.turn == agent_color:
                 rates = board_to_rates(board, agent.num_neurons, agent.stim_rate)
+                if torch.cuda.is_available():
+                    print(f"    [move {board.fullmove_number}] "
+                          f"gpu_alloc={torch.cuda.memory_allocated()/1e9:.2f}GB "
+                          f"gpu_reserved={torch.cuda.memory_reserved()/1e9:.2f}GB", flush=True)
                 logits, _value = agent(rates)
                 legal_moves = list(board.legal_moves)
                 legal_idx = [move_to_index(m) for m in legal_moves]
@@ -166,6 +178,8 @@ def train(args):
             returns.insert(0, G)
         if not returns:
             print(f"Game {game_idx}: no agent moves")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             continue
         ret_t = torch.tensor(returns, dtype=torch.float32, device=device)
         if ret_t.numel() > 1:
@@ -191,6 +205,10 @@ def train(args):
         outcome = board.result() if board.is_game_over() else "*"
         print(f"Game {game_idx}/{args.games} outcome={outcome} moves={len(rewards)} "
               f"return={sum(returns):.3f}")
+        if torch.cuda.is_available():
+            print(f"  post-game gpu_alloc={torch.cuda.memory_allocated()/1e9:.2f}GB "
+                  f"gpu_reserved={torch.cuda.memory_reserved()/1e9:.2f}GB", flush=True)
+            torch.cuda.empty_cache()
 
         if game_idx % args.save_every == 0:
             ckpt = {
