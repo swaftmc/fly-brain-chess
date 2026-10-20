@@ -104,7 +104,7 @@ def opponent_move(board, engine, opponent_elo: int):
         board.push(random.choice(legal))
 
 
-def train(args):
+def train_single(args):
     device = args.device
     data_dir = Path(args.data_dir)
     comp_path = data_dir / "2025_Completeness_783.csv"
@@ -242,9 +242,145 @@ def main():
     p.add_argument("--stockfish", default=None)
     p.add_argument("--train-backbone", action="store_true")
     p.add_argument("--checkpoint-dir", default=str(ROOT.parent / "checkpoints"))
-    p.add_argument("--save-every", type=int, default=5)
+    p.add_argument("--parallel", type=int, default=1,
+                   help="Number of games to run in parallel (batched on GPU)")
     args = p.parse_args()
-    train(args)
+    if args.parallel and args.parallel > 1:
+        train_parallel(args)
+    else:
+        train_single(args)
+
+
+def train_parallel(args):
+    device = args.device
+    data_dir = Path(args.data_dir)
+    comp_path = data_dir / "2025_Completeness_783.csv"
+    conn_path = data_dir / "2025_Connectivity_783.parquet"
+    wt_dir = data_dir
+
+    engine = make_engine(args.stockfish)
+
+    if args.train_backbone:
+        print("WARNING: full connectome backprop is disabled on Colab/T4.")
+        args.train_backbone = False
+
+    agent = ChessBrain(
+        comp_path=str(comp_path),
+        conn_path=str(conn_path),
+        wt_dir=str(wt_dir),
+        num_neurons=0,
+        readout_size=args.readout_size,
+        stim_rate=args.stim_rate,
+        sim_ms=args.sim_ms,
+        device=device,
+        train_backbone=False,
+    )
+    agent.to(device)
+
+    dense_params = [p for n, p in agent.named_parameters() if p.requires_grad]
+    opt_dense = torch.optim.Adam(dense_params, lr=args.lr) if dense_params else None
+
+    ckpt_dir = Path(args.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    num_parallel = max(1, args.parallel)
+    batches = max(1, args.games // num_parallel)
+
+    for batch_idx in range(batches):
+        boards = [chess.Board() for _ in range(num_parallel)]
+        rewards_per_game = [[] for _ in range(num_parallel)]
+        active = list(range(num_parallel))
+        agent_color = chess.WHITE
+
+        if opt_dense:
+            opt_dense.zero_grad()
+
+        while active:
+            agent_ids = [i for i in active
+                         if not boards[i].is_game_over()
+                         and boards[i].turn == agent_color
+                         and boards[i].fullmove_number <= args.max_moves]
+            if agent_ids:
+                rates = torch.stack([
+                    board_to_rates(boards[i], agent.num_neurons, agent.stim_rate)
+                    for i in agent_ids
+                ])
+                logits, _ = agent(rates)
+
+                log_probs_batch = []
+                rewards_batch = []
+                entropies_batch = []
+                for k, i in enumerate(agent_ids):
+                    legal_moves = list(boards[i].legal_moves)
+                    legal_idx = [move_to_index(m) for m in legal_moves]
+                    legal_logits = logits[k, legal_idx]
+                    dist = torch.distributions.Categorical(logits=legal_logits)
+                    choice = dist.sample()
+                    selected = legal_moves[choice.item()]
+                    log_prob = dist.log_prob(choice)
+                    entropy = dist.entropy()
+
+                    board_before = boards[i].copy()
+                    boards[i].push(selected)
+                    r = shaped_reward(board_before, selected, boards[i], engine, agent_color)
+                    rewards_per_game[i].append(r)
+
+                    log_probs_batch.append(log_prob)
+                    rewards_batch.append(r)
+                    entropies_batch.append(entropy)
+
+                loss = torch.zeros((), device=device)
+                for lp, r, ent in zip(log_probs_batch, rewards_batch, entropies_batch):
+                    reward_t = torch.tensor(r, device=device, dtype=torch.float32)
+                    loss = loss - lp * reward_t - args.entropy * ent
+                loss.backward()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            opp_ids = [i for i in active
+                       if not boards[i].is_game_over()
+                       and boards[i].turn != agent_color
+                       and boards[i].fullmove_number <= args.max_moves]
+            for i in opp_ids:
+                opponent_move(boards[i], engine, args.opponent_elo)
+
+            new_active = []
+            for i in active:
+                if (boards[i].is_game_over()
+                        or boards[i].fullmove_number > args.max_moves):
+                    outcome = boards[i].result() if boards[i].is_game_over() else "*"
+                    print(f"  Game {batch_idx * num_parallel + i + 1} outcome={outcome} "
+                          f"moves={len(rewards_per_game[i])} "
+                          f"return={sum(rewards_per_game[i]):.3f}", flush=True)
+                else:
+                    new_active.append(i)
+            active = new_active
+
+        if opt_dense:
+            torch.nn.utils.clip_grad_norm_(dense_params, args.grad_clip)
+            opt_dense.step()
+
+        game_num = (batch_idx + 1) * num_parallel
+        if game_num % args.save_every == 0 or batch_idx == batches - 1:
+            ckpt = {
+                "model": agent.state_dict(),
+                "config": {
+                    "comp_path": str(comp_path),
+                    "conn_path": str(conn_path),
+                    "wt_dir": str(wt_dir),
+                    "num_neurons": agent.num_neurons,
+                    "readout_size": args.readout_size,
+                    "stim_rate": args.stim_rate,
+                    "sim_ms": args.sim_ms,
+                    "train_backbone": False,
+                },
+            }
+            torch.save(ckpt, ckpt_dir / f"chess_agent_game{game_num}.pt")
+            print(f"  saved checkpoint game {game_num}")
+
+    if engine is not None:
+        engine.quit()
+    print("Training complete")
 
 
 if __name__ == "__main__":
