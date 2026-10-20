@@ -113,6 +113,11 @@ def train(args):
 
     engine = make_engine(args.stockfish)
 
+    if args.train_backbone:
+        print("WARNING: full connectome backprop is disabled on Colab/T4 "
+              "(sparse gradient is dense and OOMs). Training readout/policy only.")
+        args.train_backbone = False
+
     agent = ChessBrain(
         comp_path=str(comp_path),
         conn_path=str(conn_path),
